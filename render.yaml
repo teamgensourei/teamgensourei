@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: arg-game-backend
+    name: arg-scratch-backend
     env: node
     buildCommand: npm install
     startCommand: npm start
@@ -9,3 +9,5 @@ services:
         generateValue: true
       - key: NODE_ENV
         value: production
+      - key: FRONTEND_URL
+        value: https://teamgensourei.github.io

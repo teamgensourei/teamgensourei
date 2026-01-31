@@ -7,8 +7,8 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || '3k9jf0s9dfj90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://teamgensourei.github.io/';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://teamgensourei.github.io';
 
 // In-memory database
 const users = new Map();
@@ -16,7 +16,7 @@ const sessions = new Map();
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: [FRONTEND_URL, 'http://localhost:8000'],
   credentials: true
 }));
 app.use(express.json());
@@ -62,7 +62,17 @@ async function verifyScratchUser(username) {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    users: users.size
+  });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'ECHO PROTOCOL API Server',
+    version: '2.3.7',
+    status: 'active'
   });
 });
 
@@ -333,5 +343,7 @@ app.post('/api/progress', authenticate, (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ ECHO PROTOCOL Server running on port ${PORT}`);
+  console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
+  console.log(`🔐 JWT Secret: ${JWT_SECRET === 'your-secret-key-change-in-production' ? '⚠️  WARNING: Using default secret!' : '✓ Custom secret set'}`);
 });

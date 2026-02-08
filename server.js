@@ -5,9 +5,9 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 
-// Resend for email (npm install resend)
-// const { Resend } = require('resend');
-// const resend = new Resend(process.env.RESEND_API_KEY);
+Resend for email (npm install resend)
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 app.set('trust proxy', 1);

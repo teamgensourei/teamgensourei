@@ -21,9 +21,9 @@ const sessions = new Map();
    Scratchのクラウド変数が502エラーの間使用
 ========================= */
 const MANUAL_WHITELIST = [
-  'sh1gure_H1SAME',  // ← ここを実際のScratchユーザー名に変更
-  // 'siranui_ameri',
-  // '-nyonyo-'
+  'sh1gure_H1SAME',  // ← ここを実際のScratchユーザー名に変更 //
+  'siranui_ameri',
+  '-nyonyo-'
 ];
 
 let whitelistCache = new Set(MANUAL_WHITELIST.map(u => u.toLowerCase()));

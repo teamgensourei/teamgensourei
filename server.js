@@ -3,9 +3,10 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const fetch = require('node-fetch');
 
 const app = express();
+app.set('trust proxy', 1);  // ✅ Render/プロキシ対応（重要！）
+
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || '3k9jf0s9dfj90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://teamgensourei.github.io';
@@ -16,28 +17,35 @@ const users = new Map();
 const sessions = new Map();
 
 /* =========================
-   Scratchホワイトリスト機能
+   手動ホワイトリスト（一時的）
+   Scratchのクラウド変数が502エラーの間使用
 ========================= */
-let whitelistCache = new Set();
-let lastWhitelistUpdate = 0;
+const MANUAL_WHITELIST = [
+  'sh1gure_H1SAME',  // ← ここを実際のScratchユーザー名に変更
+  // 'siranui_ameri',
+  // '-nyonyo-'
+];
+
+let whitelistCache = new Set(MANUAL_WHITELIST.map(u => u.toLowerCase()));
+let lastWhitelistUpdate = Date.now();
 const WHITELIST_CACHE_DURATION = 5 * 60 * 1000; // 5分
 
-// Scratchクラウド変数からホワイトリストを取得
+// Scratchクラウド変数からホワイトリストを取得（試行）
 async function updateWhitelist() {
   try {
-    console.log('📋 Updating whitelist from Scratch cloud variables...');
+    console.log('📋 Attempting to update whitelist from Scratch cloud variables...');
     
     const response = await fetch(
       `https://clouddata.scratch.mit.edu/logs?projectid=${SCRATCH_PROJECT_ID}&limit=100`
     );
     
     if (!response.ok) {
-      console.error('❌ Failed to fetch cloud data:', response.status);
+      console.warn(`⚠️  Scratch cloud data unavailable (${response.status}), using manual whitelist`);
       return;
     }
     
     const logs = await response.json();
-    const newWhitelist = new Set();
+    const newWhitelist = new Set(MANUAL_WHITELIST.map(u => u.toLowerCase()));
     
     // ☁ login 変数から許可されたユーザーを抽出
     for (const log of logs) {
@@ -52,11 +60,13 @@ async function updateWhitelist() {
     whitelistCache = newWhitelist;
     lastWhitelistUpdate = Date.now();
     
-    console.log(`✅ Whitelist updated: ${whitelistCache.size} users allowed`);
+    console.log(`✅ Whitelist updated from Scratch: ${whitelistCache.size} users allowed`);
     console.log('Allowed users:', Array.from(whitelistCache));
     
   } catch (error) {
-    console.error('❌ Error updating whitelist:', error);
+    console.warn('⚠️  Could not fetch Scratch cloud data, using manual whitelist');
+    console.log(`📋 Manual whitelist active: ${whitelistCache.size} users`);
+    console.log('Allowed users:', Array.from(whitelistCache));
   }
 }
 
@@ -77,10 +87,14 @@ async function isUserWhitelisted(username) {
 }
 
 // 起動時にホワイトリストを読み込み
-updateWhitelist();
+console.log('🔐 Initializing whitelist...');
+console.log(`📋 Manual whitelist: ${MANUAL_WHITELIST.join(', ')}`);
+updateWhitelist().catch(() => console.log('⚠️  Using manual whitelist only'));
 
 // 定期的にホワイトリストを更新（5分ごと）
-setInterval(updateWhitelist, WHITELIST_CACHE_DURATION);
+setInterval(() => {
+  updateWhitelist().catch(() => {});
+}, WHITELIST_CACHE_DURATION);
 
 // Middleware
 app.use(cors({
@@ -92,13 +106,17 @@ app.use(express.json());
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false
 });
 app.use(limiter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false
 });
 
 // Validation functions
@@ -134,6 +152,7 @@ app.get('/health', (req, res) => {
     users: users.size,
     whitelist: {
       enabled: true,
+      mode: 'manual + cloud (fallback)',
       allowedUsers: whitelistCache.size,
       lastUpdate: new Date(lastWhitelistUpdate).toISOString()
     }
@@ -148,23 +167,23 @@ app.get('/', (req, res) => {
     status: 'active',
     whitelist: {
       enabled: true,
+      mode: 'manual + cloud (fallback)',
       allowedUsers: whitelistCache.size
     }
   });
 });
 
-/* =========================
-   ホワイトリスト確認エンドポイント（デバッグ用）
-========================= */
+// ホワイトリスト確認エンドポイント
 app.get('/api/whitelist', (req, res) => {
   res.json({
     count: whitelistCache.size,
     lastUpdate: new Date(lastWhitelistUpdate).toISOString(),
+    mode: 'manual + cloud (fallback)',
     users: Array.from(whitelistCache)
   });
 });
 
-// Step 1: Verify Scratch account（ホワイトリストチェック追加）
+// Step 1: Verify Scratch account
 app.post('/api/verify-scratch', authLimiter, async (req, res) => {
   try {
     const { scratchUsername, email } = req.body;
@@ -175,7 +194,6 @@ app.post('/api/verify-scratch', authLimiter, async (req, res) => {
       });
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ 
@@ -192,7 +210,6 @@ app.post('/api/verify-scratch', authLimiter, async (req, res) => {
       });
     }
 
-    // Check if already registered
     const existingUser = Array.from(users.values()).find(
       u => u.scratchUsername.toLowerCase() === scratchUsername.toLowerCase()
     );
@@ -203,7 +220,6 @@ app.post('/api/verify-scratch', authLimiter, async (req, res) => {
       });
     }
 
-    // Verify Scratch user exists
     const scratchUser = await verifyScratchUser(scratchUsername);
     
     if (!scratchUser) {
@@ -226,7 +242,7 @@ app.post('/api/verify-scratch', authLimiter, async (req, res) => {
   }
 });
 
-// Step 2: Complete registration with password（ホワイトリストチェック追加）
+// Step 2: Complete registration
 app.post('/api/complete-registration', authLimiter, async (req, res) => {
   try {
     const { scratchUsername, email, password } = req.body;
@@ -243,7 +259,6 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
       });
     }
 
-    // 🔐 再度ホワイトリストチェック
     const isWhitelisted = await isUserWhitelisted(scratchUsername);
     if (!isWhitelisted) {
       return res.status(403).json({ 
@@ -252,7 +267,6 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
       });
     }
 
-    // Check if already registered
     const existingUser = Array.from(users.values()).find(
       u => u.scratchUsername.toLowerCase() === scratchUsername.toLowerCase()
     );
@@ -263,7 +277,6 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
       });
     }
 
-    // Verify Scratch user again
     const scratchUser = await verifyScratchUser(scratchUsername);
     
     if (!scratchUser) {
@@ -272,10 +285,8 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
       });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user
     const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const user = {
       id: userId,
@@ -290,7 +301,6 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
 
     users.set(userId, user);
 
-    // Create session
     const token = jwt.sign(
       { userId, scratchUsername: scratchUser.username },
       JWT_SECRET,
@@ -453,6 +463,7 @@ app.post('/api/progress', authenticate, (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ ECHO PROTOCOL Server running on port ${PORT}`);
   console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
-  console.log(`🔐 JWT Secret: ${JWT_SECRET === 'your-secret-key-change-in-production' ? '⚠️  WARNING: Using default secret!' : '✓ Custom secret set'}`);
-  console.log(`📋 Whitelist: Scratch Project ${SCRATCH_PROJECT_ID}`);
+  console.log(`🔐 JWT Secret: ✓ Custom secret set`);
+  console.log(`📋 Whitelist: Scratch Project ${SCRATCH_PROJECT_ID} + Manual`);
+  console.log(`👥 Allowed users: ${Array.from(whitelistCache).join(', ')}`);
 });

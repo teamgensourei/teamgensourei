@@ -3,98 +3,89 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
+
+// Resend for email (npm install resend)
+// const { Resend } = require('resend');
+// const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
-app.set('trust proxy', 1);  // ✅ Render/プロキシ対応（重要！）
+app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || '3k9jf0s9dfj90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf90sdjf';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://teamgensourei.github.io';
-const SCRATCH_PROJECT_ID = '1260856560';
 
 // In-memory database
 const users = new Map();
 const sessions = new Map();
+const verificationCodes = new Map(); // email -> { code, scratchUsername, expiresAt }
 
 /* =========================
-   手動ホワイトリスト（一時的）
-   Scratchのクラウド変数が502エラーの間使用
+   ホワイトリスト（手動管理）
 ========================= */
 const MANUAL_WHITELIST = [
-  'sh1gure_H1SAME',  // ← ここを実際のScratchユーザー名に変更 //
+  'sh1gure_H1SAME',  // ← 許可するScratchユーザー名 //
   'siranui_ameri',
   '-nyonyo-'
 ];
 
 let whitelistCache = new Set(MANUAL_WHITELIST.map(u => u.toLowerCase()));
-let lastWhitelistUpdate = Date.now();
-const WHITELIST_CACHE_DURATION = 5 * 60 * 1000; // 5分
 
-// Scratchクラウド変数からホワイトリストを取得（試行）
-async function updateWhitelist() {
-  try {
-    console.log('📋 Attempting to update whitelist from Scratch cloud variables...');
-    
-    const response = await fetch(
-      `https://clouddata.scratch.mit.edu/logs?projectid=${SCRATCH_PROJECT_ID}&limit=100`
-    );
-    
-    if (!response.ok) {
-      console.warn(`⚠️  Scratch cloud data unavailable (${response.status}), using manual whitelist`);
-      return;
-    }
-    
-    const logs = await response.json();
-    const newWhitelist = new Set(MANUAL_WHITELIST.map(u => u.toLowerCase()));
-    
-    // ☁ login 変数から許可されたユーザーを抽出
-    for (const log of logs) {
-      if (log.name === '☁ login' && log.value) {
-        const username = decodeCloudValue(log.value);
-        if (username) {
-          newWhitelist.add(username.toLowerCase());
-        }
-      }
-    }
-    
-    whitelistCache = newWhitelist;
-    lastWhitelistUpdate = Date.now();
-    
-    console.log(`✅ Whitelist updated from Scratch: ${whitelistCache.size} users allowed`);
-    console.log('Allowed users:', Array.from(whitelistCache));
-    
-  } catch (error) {
-    console.warn('⚠️  Could not fetch Scratch cloud data, using manual whitelist');
-    console.log(`📋 Manual whitelist active: ${whitelistCache.size} users`);
-    console.log('Allowed users:', Array.from(whitelistCache));
-  }
-}
-
-// クラウド変数の値をデコード
-function decodeCloudValue(value) {
-  if (typeof value === 'string' || typeof value === 'number') {
-    return String(value).trim();
-  }
-  return null;
-}
-
-// ホワイトリストをチェック
-async function isUserWhitelisted(username) {
-  if (Date.now() - lastWhitelistUpdate > WHITELIST_CACHE_DURATION) {
-    await updateWhitelist();
-  }
+// ホワイトリストチェック
+function isUserWhitelisted(username) {
   return whitelistCache.has(username.toLowerCase());
 }
 
-// 起動時にホワイトリストを読み込み
-console.log('🔐 Initializing whitelist...');
-console.log(`📋 Manual whitelist: ${MANUAL_WHITELIST.join(', ')}`);
-updateWhitelist().catch(() => console.log('⚠️  Using manual whitelist only'));
+// 6桁の認証コードを生成
+function generateVerificationCode() {
+  return crypto.randomInt(100000, 999999).toString();
+}
 
-// 定期的にホワイトリストを更新（5分ごと）
-setInterval(() => {
-  updateWhitelist().catch(() => {});
-}, WHITELIST_CACHE_DURATION);
+// メール送信（Resend使用）
+async function sendVerificationEmail(email, code) {
+  // TODO: Resendのコメントを外して使用
+  /*
+  try {
+    await resend.emails.send({
+      from: 'noreply@yourdomain.com',
+      to: email,
+      subject: 'ECHO PROTOCOL - 認証コード',
+      html: `
+        <h2>ECHO PROTOCOL 認証コード</h2>
+        <p>以下の認証コードを入力してください：</p>
+        <h1 style="color: #00ff00; font-family: monospace;">${code}</h1>
+        <p>このコードは10分間有効です。</p>
+      `
+    });
+    return true;
+  } catch (error) {
+    console.error('Email sending error:', error);
+    return false;
+  }
+  */
+  
+  // デバッグ用：コンソールに表示
+  console.log(`📧 [DEBUG] Verification code for ${email}: ${code}`);
+  return true;
+}
+
+// Scratch APIでユーザーが存在するか確認
+async function verifyScratchUser(username) {
+  try {
+    const response = await fetch(`https://api.scratch.mit.edu/users/${username}`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return {
+      id: data.id,
+      username: data.username,
+      scratchTeam: data.scratchteam || false
+    };
+  } catch (error) {
+    console.error('Scratch API error:', error);
+    return null;
+  }
+}
 
 // Middleware
 app.use(cors({
@@ -119,29 +110,12 @@ const authLimiter = rateLimit({
   legacyHeaders: false
 });
 
-// Validation functions
+// Validation
 function validatePassword(password) {
   return password.length >= 8 &&
          /[A-Z]/.test(password) &&
          /[a-z]/.test(password) &&
          /[0-9]/.test(password);
-}
-
-// Verify Scratch user exists
-async function verifyScratchUser(username) {
-  try {
-    const response = await fetch(`https://api.scratch.mit.edu/users/${username}`);
-    if (!response.ok) return null;
-    const data = await response.json();
-    return {
-      id: data.id,
-      username: data.username,
-      scratchTeam: data.scratchteam || false
-    };
-  } catch (error) {
-    console.error('Scratch API error:', error);
-    return null;
-  }
 }
 
 // Health check
@@ -152,39 +126,34 @@ app.get('/health', (req, res) => {
     users: users.size,
     whitelist: {
       enabled: true,
-      mode: 'manual + cloud (fallback)',
-      allowedUsers: whitelistCache.size,
-      lastUpdate: new Date(lastWhitelistUpdate).toISOString()
-    }
-  });
-});
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'ECHO PROTOCOL API Server',
-    version: '2.3.7',
-    status: 'active',
-    whitelist: {
-      enabled: true,
-      mode: 'manual + cloud (fallback)',
       allowedUsers: whitelistCache.size
     }
   });
 });
 
-// ホワイトリスト確認エンドポイント
+// Root
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'ECHO PROTOCOL API Server',
+    version: '2.4.0',
+    status: 'active',
+    authMethod: 'email-verification'
+  });
+});
+
+// ホワイトリスト確認
 app.get('/api/whitelist', (req, res) => {
   res.json({
     count: whitelistCache.size,
-    lastUpdate: new Date(lastWhitelistUpdate).toISOString(),
-    mode: 'manual + cloud (fallback)',
     users: Array.from(whitelistCache)
   });
 });
 
-// Step 1: Verify Scratch account
-app.post('/api/verify-scratch', authLimiter, async (req, res) => {
+/* =========================
+   新規登録フロー
+   Step 1: Scratchユーザー名とメール送信
+========================= */
+app.post('/api/register/send-code', authLimiter, async (req, res) => {
   try {
     const { scratchUsername, email } = req.body;
 
@@ -194,6 +163,7 @@ app.post('/api/verify-scratch', authLimiter, async (req, res) => {
       });
     }
 
+    // メール形式チェック
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ 
@@ -202,71 +172,14 @@ app.post('/api/verify-scratch', authLimiter, async (req, res) => {
     }
 
     // 🔐 ホワイトリストチェック
-    const isWhitelisted = await isUserWhitelisted(scratchUsername);
-    if (!isWhitelisted) {
-      return res.status(403).json({ 
-        error: 'このScratchアカウントは登録が許可されていません。管理者に連絡してホワイトリストに追加してもらってください。',
-        code: 'NOT_WHITELISTED'
-      });
-    }
-
-    const existingUser = Array.from(users.values()).find(
-      u => u.scratchUsername.toLowerCase() === scratchUsername.toLowerCase()
-    );
-
-    if (existingUser) {
-      return res.status(409).json({ 
-        error: 'このScratchアカウントは既に登録されています' 
-      });
-    }
-
-    const scratchUser = await verifyScratchUser(scratchUsername);
-    
-    if (!scratchUser) {
-      return res.status(404).json({ 
-        error: 'Scratchユーザーが見つかりません。ユーザー名を確認してください。' 
-      });
-    }
-
-    res.json({
-      message: 'Scratchアカウントを確認しました',
-      scratchUser: {
-        id: scratchUser.id,
-        username: scratchUser.username
-      },
-      verified: true
-    });
-  } catch (error) {
-    console.error('Verification error:', error);
-    res.status(500).json({ error: 'サーバーエラーが発生しました' });
-  }
-});
-
-// Step 2: Complete registration
-app.post('/api/complete-registration', authLimiter, async (req, res) => {
-  try {
-    const { scratchUsername, email, password } = req.body;
-
-    if (!scratchUsername || !email || !password) {
-      return res.status(400).json({ 
-        error: 'すべてのフィールドを入力してください' 
-      });
-    }
-
-    if (!validatePassword(password)) {
-      return res.status(400).json({ 
-        error: 'パスワードは8文字以上で、大文字、小文字、数字を含む必要があります' 
-      });
-    }
-
-    const isWhitelisted = await isUserWhitelisted(scratchUsername);
-    if (!isWhitelisted) {
+    if (!isUserWhitelisted(scratchUsername)) {
       return res.status(403).json({ 
         error: 'このScratchアカウントは登録が許可されていません',
         code: 'NOT_WHITELISTED'
       });
     }
 
+    // 既に登録済みかチェック
     const existingUser = Array.from(users.values()).find(
       u => u.scratchUsername.toLowerCase() === scratchUsername.toLowerCase()
     );
@@ -277,6 +190,7 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
       });
     }
 
+    // Scratchユーザーが存在するか確認
     const scratchUser = await verifyScratchUser(scratchUsername);
     
     if (!scratchUser) {
@@ -285,13 +199,99 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
       });
     }
 
+    // 認証コードを生成
+    const code = generateVerificationCode();
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10分後
+
+    // 保存
+    verificationCodes.set(email, {
+      code,
+      scratchUsername: scratchUser.username,
+      scratchId: scratchUser.id,
+      expiresAt
+    });
+
+    // メール送信
+    const sent = await sendVerificationEmail(email, code);
+
+    if (!sent) {
+      return res.status(500).json({ 
+        error: 'メール送信に失敗しました' 
+      });
+    }
+
+    res.json({
+      message: '認証コードをメールに送信しました',
+      email,
+      expiresIn: 600 // 秒
+    });
+
+  } catch (error) {
+    console.error('Send code error:', error);
+    res.status(500).json({ error: 'サーバーエラーが発生しました' });
+  }
+});
+
+/* =========================
+   Step 2: 認証コード確認とアカウント作成
+========================= */
+app.post('/api/register/verify-code', authLimiter, async (req, res) => {
+  try {
+    const { email, code, password } = req.body;
+
+    if (!email || !code || !password) {
+      return res.status(400).json({ 
+        error: 'すべてのフィールドを入力してください' 
+      });
+    }
+
+    // 認証コード確認
+    const verification = verificationCodes.get(email);
+
+    if (!verification) {
+      return res.status(400).json({ 
+        error: '認証コードが見つかりません。最初からやり直してください' 
+      });
+    }
+
+    // 有効期限チェック
+    if (Date.now() > verification.expiresAt) {
+      verificationCodes.delete(email);
+      return res.status(400).json({ 
+        error: '認証コードの有効期限が切れました。最初からやり直してください' 
+      });
+    }
+
+    // コード照合
+    if (verification.code !== code) {
+      return res.status(400).json({ 
+        error: '認証コードが正しくありません' 
+      });
+    }
+
+    // パスワード検証
+    if (!validatePassword(password)) {
+      return res.status(400).json({ 
+        error: 'パスワードは8文字以上で、大文字、小文字、数字を含む必要があります' 
+      });
+    }
+
+    // 再度ホワイトリストチェック
+    if (!isUserWhitelisted(verification.scratchUsername)) {
+      return res.status(403).json({ 
+        error: 'このScratchアカウントは登録が許可されていません',
+        code: 'NOT_WHITELISTED'
+      });
+    }
+
+    // ユーザー作成
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const user = {
       id: userId,
-      scratchId: scratchUser.id,
-      scratchUsername: scratchUser.username,
+      scratchId: verification.scratchId,
+      scratchUsername: verification.scratchUsername,
       email,
       password: hashedPassword,
       createdAt: new Date().toISOString(),
@@ -301,34 +301,41 @@ app.post('/api/complete-registration', authLimiter, async (req, res) => {
 
     users.set(userId, user);
 
+    // 認証コードを削除
+    verificationCodes.delete(email);
+
+    // セッション作成
     const token = jwt.sign(
-      { userId, scratchUsername: scratchUser.username },
+      { userId, scratchUsername: user.scratchUsername },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
 
     sessions.set(token, { userId, createdAt: Date.now() });
 
-    console.log(`✅ New user registered: ${scratchUser.username}`);
+    console.log(`✅ New user registered: ${user.scratchUsername}`);
 
     res.status(201).json({
       message: 'アカウントが作成されました',
       token,
       user: {
         id: userId,
-        scratchUsername: scratchUser.username,
-        scratchId: scratchUser.id,
+        scratchUsername: user.scratchUsername,
+        scratchId: user.scratchId,
         email,
         level: 1
       }
     });
+
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error('Verify code error:', error);
     res.status(500).json({ error: 'サーバーエラーが発生しました' });
   }
 });
 
-// Login
+/* =========================
+   ログイン（既存）
+========================= */
 app.post('/api/login', authLimiter, async (req, res) => {
   try {
     const { scratchUsername, password } = req.body;
@@ -406,7 +413,7 @@ function authenticate(req, res, next) {
   }
 }
 
-// Get profile
+// Profile
 app.get('/api/profile', authenticate, (req, res) => {
   const user = users.get(req.user.userId);
 
@@ -435,7 +442,7 @@ app.post('/api/logout', authenticate, (req, res) => {
   res.json({ message: 'ログアウトしました' });
 });
 
-// Update progress
+// Progress
 app.post('/api/progress', authenticate, (req, res) => {
   const user = users.get(req.user.userId);
   const { challenge, status, data } = req.body;
@@ -460,10 +467,20 @@ app.post('/api/progress', authenticate, (req, res) => {
   });
 });
 
+// 定期的に期限切れの認証コードを削除（メモリリーク防止）
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, data] of verificationCodes.entries()) {
+    if (now > data.expiresAt) {
+      verificationCodes.delete(email);
+    }
+  }
+}, 5 * 60 * 1000); // 5分ごと
+
 app.listen(PORT, () => {
   console.log(`✅ ECHO PROTOCOL Server running on port ${PORT}`);
   console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
   console.log(`🔐 JWT Secret: ✓ Custom secret set`);
-  console.log(`📋 Whitelist: Scratch Project ${SCRATCH_PROJECT_ID} + Manual`);
-  console.log(`👥 Allowed users: ${Array.from(whitelistCache).join(', ')}`);
+  console.log(`📧 Auth Method: Email Verification`);
+  console.log(`📋 Whitelist: ${Array.from(whitelistCache).join(', ')}`);
 });
